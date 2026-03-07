@@ -409,9 +409,11 @@ C.touch = (function () {
             C.log('Touch: init');
 
             // prevent page dragging
-            $(document.body).on('touchmove', function (e) {
+            // Use { passive: false } to ensure preventDefault() works on iOS Safari 11.3+,
+            // where touch event listeners are passive by default on document/body.
+            document.body.addEventListener('touchmove', function (e) {
                 e.preventDefault();
-            });
+            }, { passive: false });
 
             // Fix for mouseout on desktop
             if (!t) {
