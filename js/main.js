@@ -24,6 +24,10 @@ var C = {
         C.client.init();
         C.db.init(C.debug);
         C.touch.init();
+
+        // Create global scroll spacer (direct child of wrapper for native scrolling)
+        C.scrollSpacer = $('<div class="scroll-spacer"></div>').appendTo(C.$wrapper);
+
         C.listCollection.init();
 
         // restore state
@@ -57,6 +61,7 @@ var C = {
         }
 
         C.currentCollection.load(0, true); // passing in (position:0) and (noAnimation:true)
+        C.currentCollection.updateBounds(); // ensure scroll spacer height is correct
 
         if (!C.listCollection.initiated) {
             // If we started with a TodoCollection, load ListCollection and position it for pulldown

@@ -21,22 +21,18 @@ C.client = (function () {
                 C.client.update();
             });
 
-            // compatibility
-            // only supports browsers with CSS 3D Transforms
-            // Chrome, FF, IE10+
+            // Modern browsers: just use unprefixed transform
+            C.client.transformProperty = 'transform';
+            C.client.transitionEndEvent = 'transitionend';
 
+            // Fallback for older WebKit
             var s = document.body.style;
+            if (!('transform' in s) && 'webkitTransform' in s) {
+                C.client.transformProperty = 'webkitTransform';
+                C.client.transitionEndEvent = 'webkitTransitionEnd';
+            }
 
             C.client.isWebkit = 'webkitTransform' in s;
-            
-            C.client.transformProperty =
-                'webkitTransform' in s ? 'webkitTransform' :
-                'mozTransform' in s ? 'mozTransform' :
-                'msTransform' in s ? 'msTransform' : 'transform';
-
-            var t = C.client.transformProperty;
-            C.client.transitionEndEvent =
-                t === 'webkitTransform' ? 'webkitTransitionEnd' : 'transitionend';
 
         },
 
@@ -46,9 +42,8 @@ C.client = (function () {
 
                 this.width = window.innerWidth,
                 this.height = window.innerHeight;
-                if (C.currentView) {
-                    C.currentView.updateBounds();
-                    C.currentView.onDragEnd(0);
+                if (C.currentCollection) {
+                    C.currentCollection.updateBounds();
                 }
 
             } else {

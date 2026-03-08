@@ -1,22 +1,22 @@
 // The C.Collection base object
-// inehrited by C.ListCollection and C.TodoCollection
+// inherited by C.ListCollection and C.TodoCollection
+//
+// Modernized: uses native scrollTop instead of JS-driven momentum.
+// moveY() is only used for collection-switch animations.
+// Boundary pull gestures (pull-down/pull-up) are handled via pullOffset.
 
 C.Collection = (function (raf) {
 
-    var dragElasticity      = .45,
-        friction            = .95,
-        speedMultiplier     = 16,
-        maxSpeed            = 35,
-        diff                = 0.5, // the min distance from target an animation loop chain should reach before ending
-        sortMoveSpeed       = 4.5;
+    var sortMoveSpeed       = 4.5;
 
-    var beforeEditPosition  = 0; // used to record position before edit focus
+    var beforeEditPosition  = 0; // used to record scroll position before edit focus
 
     return {
 
         init: function (data) {
 
-            this.y = 0;
+            this.y = 0;           // only used for collection-switch transforms
+            this.pullOffset = 0;  // tracks pull beyond scroll boundary
             this.upperBound = 0;
             this.initiated = false;
 
@@ -41,6 +41,8 @@ C.Collection = (function (raf) {
             this.longPullingUp = false;
             this.pastLongPullDownThreshold = false;
             this.pastLongPullUpThreshold = false;
+
+            this.pullOffset = 0;
 
         },
 
@@ -150,10 +152,50 @@ C.Collection = (function (raf) {
 
         },
 
+        // getScrollY / setScrollY: wrappers for native scrollTop
+        // returns negative value (same convention as old this.y)
+        getScrollY: function () {
+            return -C.$wrapper[0].scrollTop;
+        },
+
+        setScrollY: function (y) {
+            C.$wrapper[0].scrollTop = -y;
+        },
+
+        // moveY: only used for collection-switch animations (not normal scrolling)
         moveY: function (y) {
 
             this.y = y;
             this.style[C.client.transformProperty] = 'translate3d(0px,' + y + 'px, 0px)';
+
+        },
+
+        // Hide/show for off-screen positioning.
+        // With native scroll, off-screen collections can be scrolled into view.
+        // display:none completely removes them from the rendering tree so they
+        // don't contribute to scrollHeight.
+        hideOffScreen: function () {
+            this.el[0].style.display = 'none';
+        },
+
+        showForSwitch: function () {
+            this.el[0].style.display = '';
+        },
+
+        // beginSwitch / endSwitch: disable native scroll during collection-switch animations
+        beginSwitch: function () {
+
+            C.$wrapper[0].classList.add('native-scroll-disabled');
+
+        },
+
+        endSwitch: function () {
+
+            C.$wrapper[0].classList.remove('native-scroll-disabled');
+            // Ensure scroll spacer matches the now-active collection
+            if (C.currentCollection) {
+                C.currentCollection.updateBounds(true);
+            }
 
         },
 
@@ -204,123 +246,97 @@ C.Collection = (function (raf) {
             this.height = this.items.length * C.ITEM_HEIGHT;
             this.upperBound = Math.min(0, C.client.height - (this.height + C.ITEM_HEIGHT));
 
-            // move into bound when items are deleted
-            if (this.y < this.upperBound && !noMove) {
-                this.moveY(this.upperBound);
+            // Update global scroll spacer only for the active collection
+            if (C.scrollSpacer && (!C.currentCollection || C.currentCollection === this)) {
+                var spacerHeight = this.height + C.ITEM_HEIGHT;
+                C.scrollSpacer[0].style.height = spacerHeight + 'px';
+            }
+
+            // When items are deleted, clamp scroll to bounds
+            if (!noMove) {
+                var wrapper = C.$wrapper[0];
+                var maxScroll = Math.max(0, this.height + C.ITEM_HEIGHT - C.client.height);
+                if (wrapper.scrollTop > maxScroll) {
+                    wrapper.scrollTop = maxScroll;
+                }
             }
 
         },
 
-        onDragStart: function () {
-
+        // Pull gesture handlers (called by touch.js gesture arbiter)
+        onPullStart: function () {
+            this.pullOffset = 0;
             this.el.addClass('drag');
-
         },
 
-        onDragMove: function (dy) {
+        onPullMove: function (direction, dy) {
 
-            if (this.y + dy < this.upperBound || this.y + dy > 0) {
-                dy *= dragElasticity;
-            }
+            // direction: 'down' when at top, 'up' when at bottom
+            // dy: the raw pointer delta for this frame
 
-            this.moveY(this.y + dy);
+            var elasticity = 0.45;
+            this.pullOffset += dy * elasticity;
 
-            // pulling down, animate pull to create dummy item
-            if (this.y > 0) {
-                if (!this.pullingDown) {
-                    this.pullingDown = true;
-                    this.topDummy.show();
-                }
-                if (this.y <= C.ITEM_HEIGHT) {
-                    if (this.pastPullDownThreshold) {
-                        this.pastPullDownThreshold = false;
-                        this.topDummyText.text('Pull to Create ' + this.itemTypeText);
+            if (direction === 'down') {
+
+                // Pulling down from top: show pull-to-create dummy
+                var offset = Math.max(0, this.pullOffset);
+
+                // Move items down via a container transform
+                this.style[C.client.transformProperty] = 'translate3d(0px,' + offset + 'px, 0px)';
+
+                if (offset > 0) {
+                    if (!this.pullingDown) {
+                        this.pullingDown = true;
+                        this.topDummy.show();
                     }
-                    var pct = this.y / C.ITEM_HEIGHT;
-                    var r = Math.max(0, (1 - pct) * 90);
-                    this.topDummySliderStyle[C.client.transformProperty] = 'rotateX(' + r + 'deg)';
-                    this.topDummySliderStyle.opacity = pct / 2 + .5;
+                    if (offset <= C.ITEM_HEIGHT) {
+                        if (this.pastPullDownThreshold) {
+                            this.pastPullDownThreshold = false;
+                            this.topDummyText.text('Pull to Create ' + this.itemTypeText);
+                        }
+                        var pct = offset / C.ITEM_HEIGHT;
+                        var r = Math.max(0, (1 - pct) * 90);
+                        this.topDummySliderStyle[C.client.transformProperty] = 'rotateX(' + r + 'deg)';
+                        this.topDummySliderStyle.opacity = pct / 2 + .5;
+                    } else {
+                        if (!this.pastPullDownThreshold) {
+                            this.pastPullDownThreshold = true;
+                            this.topDummySliderStyle[C.client.transformProperty] = 'none';
+                            this.topDummySliderStyle.opacity = 1;
+                            this.topDummyText.text('Release to Create ' + this.itemTypeText);
+                        }
+                    }
                 } else {
-                    if (!this.pastPullDownThreshold) {
-                        this.pastPullDownThreshold = true;
-                        this.topDummySliderStyle[C.client.transformProperty] = 'none';
-                        this.topDummySliderStyle.opacity = 1;
-                        this.topDummyText.text('Release to Create ' + this.itemTypeText);
+                    if (this.pullingDown) {
+                        this.pullingDown = false;
+                        this.topDummy.hide();
                     }
                 }
-            } else {
-                if (this.pullingDown) {
-                    this.pullingDown = false;
-                    this.topDummy.hide();
-                }
+
             }
+            // 'up' direction handling is in subclasses (todo-collection, list-collection)
 
         },
 
-        // the default on drag end
-        // bounce the thing back into bounds
-        // only gets called when no action is triggered
-        onDragEnd: function (speed) {
+        // Default onPullEnd: bounce back
+        onPullEnd: function (direction) {
+
+            this.el.removeClass('drag');
+
+            // Reset pull transform
+            this.el.addClass('ease-out');
+            this.style[C.client.transformProperty] = 'translate3d(0px, 0px, 0px)';
 
             var col = this;
-            speed = Math.max(-maxSpeed, Math.min(maxSpeed, speed * speedMultiplier));
+            this.onTransitionEnd(function () {
+                col.el.removeClass('ease-out');
+                col.style[C.client.transformProperty] = '';
+            });
 
-            col.inMomentum = true;
-            loop();
-
-            function loop () {
-
-                if (C.touch.isDown) {
-                    endLoop();
-                    return;
-                }
-
-                if (col.y < col.upperBound - diff) { // dragged over bottom
-                    col.y += (col.upperBound - col.y) / 5; // apply elastic bounce back
-                    speed *= .85; // apply additional friction
-                    if (col.y < col.upperBound - diff) {
-                        raf(loop);
-                        render();
-                    } else {
-                        col.moveY(col.upperBound);
-                        endLoop();
-                    }
-                } else if (col.y > diff) { // dragged over top
-                    col.y *= .8;
-                    speed *= .85;
-                    if (col.y > diff) {
-                        raf(loop);
-                        render();
-                    } else {
-                        col.moveY(0);
-                        endLoop();
-                    }
-                } else if (Math.abs(speed) > 0.1) { // normal moving
-                    raf(loop);
-                    render();
-                } else { // natural stop due to friction
-                    endLoop();
-                }
-
-            }
-
-            function endLoop () {
-                col.el.removeClass('drag');
-                col.inMomentum = false;
-                col.topDummy.hide();
-                if (col.bottomSwitch) col.bottomSwitch.hide();
-            }
-
-            function render () {
-                col.moveY(col.y + speed);
-                speed *= friction;
-                if (col.y >= 0) {
-                    var pct = col.y / C.ITEM_HEIGHT;
-                    var r = Math.max(0, (1 - pct) * 90);
-                    col.topDummySliderStyle[C.client.transformProperty] = 'rotateX(' + r + 'deg)';
-                    col.topDummySliderStyle.opacity = pct / 2 + .5;
-                }
-            }
+            this.topDummy.hide();
+            if (this.bottomSwitch) this.bottomSwitch.hide();
+            this.pullOffset = 0;
 
         },
 
@@ -336,32 +352,33 @@ C.Collection = (function (raf) {
 
         },
 
-        // need better doc here, target is an Item
-
+        // Sort auto-scroll: uses native scrollTop instead of moveY
         sortMove: function (dir, target) {
-            
+
             var col = this,
                 dy  = dir * sortMoveSpeed;
 
             col.sortMoving = true;
-            col.el.addClass('drag');
             loop();
 
             function loop () {
 
                 if (!col.sortMoving) {
-                    col.el.removeClass('drag');
                     return;
                 }
 
                 raf(loop);
 
-                var cty = Math.max(col.upperBound, Math.min(0, col.y + dy));
+                var wrapper = C.$wrapper[0];
+                var maxScroll = Math.max(0, col.height + C.ITEM_HEIGHT - C.client.height);
+                var newScroll = Math.max(0, Math.min(maxScroll, wrapper.scrollTop - dy));
 
-                target.moveY(target.y - (cty - col.y));
+                var scrollDelta = newScroll - wrapper.scrollTop;
+                wrapper.scrollTop = newScroll;
+
+                // Move the sorting item to compensate for the scroll change
+                target.moveY(target.y - scrollDelta);
                 target.checkSwap();
-
-                col.moveY(cty);
 
             }
 
@@ -369,34 +386,25 @@ C.Collection = (function (raf) {
 
         onEditStart: function (at, noRemember) {
 
-            beforeEditPosition = noRemember ? 0 : this.y;
-
-            // Reason for using a setTimeout here: (or at least what I think is the case)
-            // It seems in iOS browsers when you trigger the keyboard for the first time,
-            // there's some heavy initialization work going on. This function is called
-            // from the function that was initially triggered by the input focus event,
-            // so the css transitions triggered here will be blocked. I'm avoiding that
-            // by putting the class changes into a new call stack.
+            beforeEditPosition = noRemember ? 0 : C.$wrapper[0].scrollTop;
 
             var t = this;
             setTimeout(function () {
 
-                // If on desktop, move currently focused item to top.
-                // mobile devices will do auto page re-positioning on focus
-                // and since behavior across different devices will vary,
-                // better leave it alone here.
                 if (!C.client.isTouch) {
-                    t.moveY(-at * C.ITEM_HEIGHT);
+                    C.$wrapper[0].scrollTop = at * C.ITEM_HEIGHT;
                 }
 
                 if (noRemember) {
                     t.el
                         .removeClass('drag')
                         .addClass('ease-out');
-                    t.moveY(0);
+                    t.style[C.client.transformProperty] = 'translate3d(0px, 0px, 0px)';
                     t.onTransitionEnd(function () {
                         t.el.removeClass('ease-out');
+                        t.style[C.client.transformProperty] = '';
                     });
+                    C.$wrapper[0].scrollTop = 0;
                 }
                 t.el.addClass('shade');
             }, 0);
@@ -406,16 +414,13 @@ C.Collection = (function (raf) {
         onEditDone: function (callback) {
 
             if (!C.client.isTouch) {
-                this.moveY(beforeEditPosition);
+                C.$wrapper[0].scrollTop = beforeEditPosition;
             }
 
             this.el.removeClass('shade');
             if (this.items.length === 1) {
                 callback();
             } else {
-                // passing in {noStrict: true}
-                // must avoid (e.target === this) checking here because
-                // triggered transition doesn't happen on itself
                 this.onTransitionEnd(callback, true);
             }
 
@@ -426,7 +431,7 @@ C.Collection = (function (raf) {
         },
 
         onPinchOutMove: function (i, touch) {
-            
+
         },
 
         onPinchOutCancel: function () {
@@ -443,8 +448,8 @@ C.Collection = (function (raf) {
             this.topDummy.hide();
             this.topDummyText.text('Pull to Create ' + this.itemTypeText);
 
-            // move the whole thing up one row
-            this.moveY(this.y - C.ITEM_HEIGHT);
+            // Reset pull transform
+            this.style[C.client.transformProperty] = '';
 
             // move all items down one row
             this.el.addClass('instant');
@@ -495,16 +500,7 @@ C.Collection = (function (raf) {
 
             newItem.el.addClass('dummy-item bottom');
 
-            // Focus in advance to get around an iOS caveat:
-            // iOS only allows field focus to be triggered within a call stack
-            // that's directly initiated by user input.
             newItem.el.find('.field').show().focus();
-
-            // Also, an interesting discovery here:
-            // If a field has transform: rotateX(90deg) when it's focused on,
-            // the iOS keyboard will be triggered but no page re-positioning happens.
-            // So here I have to set the new item's slider transform to be rotateX(-91deg)
-            // to properly trigger the page re-positioning.
 
             setTimeout(function () {
                 newItem.el.find('.slider')[0].style[C.client.transformProperty] = 'rotateX(0deg)';
@@ -517,7 +513,7 @@ C.Collection = (function (raf) {
         },
 
         createItemInBetween: function () {
-            
+
             var newData = {
                 title: '',
                 order: this.count
@@ -572,7 +568,7 @@ C.Collection = (function (raf) {
 
         },
 
-        // listen for webkitTransitionEnd
+        // listen for transitionEnd
         onTransitionEnd: function (callback, noStrict) {
 
             var t = this;

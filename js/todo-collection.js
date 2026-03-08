@@ -1,5 +1,5 @@
 C.TodoCollection = function (data, listItem) {
-    
+
     C.log('TodoCollection: init <' + data.title + '>');
 
     this.stateType = C.states.TODO_COLLECTION_VIEW;
@@ -60,6 +60,7 @@ C.TodoCollection.prototype = {
 
         if (noAnimation) {
 
+            t.showForSwitch();
             t.updatePosition();
             t.el.appendTo(C.$wrapper);
 
@@ -68,6 +69,10 @@ C.TodoCollection.prototype = {
             if (t.initiated) {
                 t.el.remove();
             }
+
+            // Begin switch animation
+            t.showForSwitch();
+            t.beginSwitch();
 
             // move to match the position of the ListItem
             t.moveY(at * C.ITEM_HEIGHT + C.listCollection.y);
@@ -86,6 +91,13 @@ C.TodoCollection.prototype = {
                 t.moveY(0);
                 // expand items to their right positions
                 t.updatePosition();
+
+                t.onTransitionEnd(function () {
+                    t.style[C.client.transformProperty] = '';
+                    t.endSwitch();
+                    C.$wrapper[0].scrollTop = 0;
+                    if (C.touch.updateScrollBounds) C.touch.updateScrollBounds();
+                });
 
             }, 0);
 
@@ -123,91 +135,120 @@ C.TodoCollection.prototype = {
 
     },
 
-    onDragMove: function () {
+    // Override onPullMove for boundary pull gestures
+    onPullMove: function (direction, dy) {
 
-        this.base.onDragMove.apply(this, arguments);
+        // Call base for pull-down dummy item animation
+        this.base.onPullMove.apply(this, arguments);
 
         var lc = C.listCollection;
+        var offset = this.pullOffset;
 
-        // long pull down
-        if (this.y >= C.ITEM_HEIGHT * 2) {
-            if (!this.longPullingDown) {
-                this.longPullingDown = true;
-                this.topSwitch.show();
-                this.topDummy.css('opacity', '0');
-            }
-            lc.moveY(this.y - lc.height - C.ITEM_HEIGHT * 2);
-        } else {
-            if (this.longPullingDown) {
-                this.longPullingDown = false;
-                this.topDummy.css('opacity', '1');
-                this.topSwitch.hide();
-                lc.moveY(-lc.height - C.ITEM_HEIGHT * 2);
-            }
-        }
+        if (direction === 'down') {
 
-        // long pull up
-        if (this.y < this.upperBound) {
-
-            if (!this.longPullingUp) {
-
-                this.longPullingUp = true;
-
-                var pos = Math.max(C.client.height, this.height + C.ITEM_HEIGHT) + C.ITEM_HEIGHT * 2;
-                this.bottomSwitch[0].style[C.client.transformProperty] = 'translate3d(0px,' + pos + 'px, 0px)';
-                this.bottomSwitch.show();
-
-                if (this.hasDoneItems) {
-                    this.bottomSwitch.removeClass('empty');
-                    this.drawer.removeClass('full');
-                } else {
-                    this.bottomSwitch.addClass('empty');
+            // long pull down - switch to lists
+            if (offset >= C.ITEM_HEIGHT * 2) {
+                if (!this.longPullingDown) {
+                    this.longPullingDown = true;
+                    this.topSwitch.show();
+                    this.topDummy.css('opacity', '0');
+                    lc.showForSwitch();
                 }
-            }
-
-            // move the small arrow
-            if (this.hasDoneItems) {
-                var offset = (this.upperBound - this.y) / (2 * C.ITEM_HEIGHT) * (C.ITEM_HEIGHT + 15);
-                this.smallArrowStyle[C.client.transformProperty] = 'translate3d(0,' + offset + 'px, 0)';
-            }
-
-            // check threshold
-            if (this.y < this.upperBound - C.ITEM_HEIGHT * 2) {
-                if (!this.pastLongPullUpThreshold) {
-                    this.pastLongPullUpThreshold = true;
-                    this.drawer.addClass('full');
-                }
+                lc.moveY(offset - lc.height - C.ITEM_HEIGHT * 2);
             } else {
-                if (this.pastLongPullUpThreshold) {
-                    this.pastLongPullUpThreshold = false;
-                    this.drawer.removeClass('full');
+                if (this.longPullingDown) {
+                    this.longPullingDown = false;
+                    this.topDummy.css('opacity', '1');
+                    this.topSwitch.hide();
+                    lc.moveY(-lc.height - C.ITEM_HEIGHT * 2);
+                    lc.hideOffScreen();
                 }
             }
 
-        } else {
-            if (this.longPullingUp) {
-                this.longPullingUp = false;
-                this.bottomSwitch.hide();
+        } else if (direction === 'up') {
+
+            // Pull up from bottom - show clear done items drawer
+            var pullUp = -offset; // make positive
+
+            if (pullUp > 0) {
+
+                // Apply visual offset via transform
+                this.style[C.client.transformProperty] = 'translate3d(0px,' + (-pullUp) + 'px, 0px)';
+
+                if (!this.longPullingUp) {
+
+                    this.longPullingUp = true;
+
+                    var pos = Math.max(C.client.height, this.height + C.ITEM_HEIGHT) + C.ITEM_HEIGHT * 2;
+                    this.bottomSwitch[0].style[C.client.transformProperty] = 'translate3d(0px,' + pos + 'px, 0px)';
+                    this.bottomSwitch.show();
+
+                    if (this.hasDoneItems) {
+                        this.bottomSwitch.removeClass('empty');
+                        this.drawer.removeClass('full');
+                    } else {
+                        this.bottomSwitch.addClass('empty');
+                    }
+                }
+
+                // move the small arrow
+                if (this.hasDoneItems) {
+                    var arrowOffset = pullUp / (2 * C.ITEM_HEIGHT) * (C.ITEM_HEIGHT + 15);
+                    this.smallArrowStyle[C.client.transformProperty] = 'translate3d(0,' + arrowOffset + 'px, 0)';
+                }
+
+                // check threshold
+                if (pullUp > C.ITEM_HEIGHT * 2) {
+                    if (!this.pastLongPullUpThreshold) {
+                        this.pastLongPullUpThreshold = true;
+                        this.drawer.addClass('full');
+                    }
+                } else {
+                    if (this.pastLongPullUpThreshold) {
+                        this.pastLongPullUpThreshold = false;
+                        this.drawer.removeClass('full');
+                    }
+                }
+
+            } else {
+                if (this.longPullingUp) {
+                    this.longPullingUp = false;
+                    this.bottomSwitch.hide();
+                }
             }
+
         }
 
     },
 
-    onDragEnd: function () {
+    // Override onPullEnd for boundary pull gestures
+    onPullEnd: function (direction) {
 
+        var offset = this.pullOffset;
         this.resetDragStates();
 
-        if (this.y >= C.ITEM_HEIGHT * 2) {
-            this.onPullDown();
-            return; // cancel default bounce back
-        } else if (this.y >= C.ITEM_HEIGHT) {
-            this.createItemAtTop();
-            return;
-        } else if (this.y <= this.upperBound - C.ITEM_HEIGHT * 2) {
-            this.onPullUp();
+        if (direction === 'down') {
+
+            if (offset >= C.ITEM_HEIGHT * 2) {
+                this.onPullDown();
+                return;
+            } else if (offset >= C.ITEM_HEIGHT) {
+                this.createItemAtTop();
+                return;
+            }
+
+        } else if (direction === 'up') {
+
+            var pullUp = -offset;
+            if (pullUp >= C.ITEM_HEIGHT * 2 && this.hasDoneItems) {
+                this.onPullUp();
+                return;
+            }
+
         }
 
-        this.base.onDragEnd.apply(this, arguments);
+        // Default: bounce back
+        this.base.onPullEnd.apply(this, arguments);
 
     },
 
@@ -221,9 +262,11 @@ C.TodoCollection.prototype = {
         if (fadedItem) fadedItem.el.removeClass('fade');
 
         lc.el.removeClass('drag');
+        lc.beginSwitch();
         lc.moveY(0);
 
         this.el.removeClass('drag');
+        this.beginSwitch();
         this.moveY(Math.max(lc.height, C.client.height) + C.ITEM_HEIGHT * 2);
 
         C.setCurrentCollection(lc);
@@ -232,6 +275,10 @@ C.TodoCollection.prototype = {
         var t = this;
         t.onTransitionEnd(function () {
             t.positionForPullUp();
+            lc.style[C.client.transformProperty] = '';
+            lc.endSwitch();
+            C.$wrapper[0].scrollTop = 0;
+            if (C.touch.updateScrollBounds) C.touch.updateScrollBounds();
         });
 
     },
@@ -239,7 +286,10 @@ C.TodoCollection.prototype = {
     // clear done items!
     onPullUp: function () {
 
-        if (!this.hasDoneItems) return;
+        // Reset pull transform first
+        this.el.removeClass('drag');
+        this.style[C.client.transformProperty] = '';
+        this.bottomSwitch.hide();
 
         // calculate the distance to drop
         var dist;
@@ -288,6 +338,7 @@ C.TodoCollection.prototype = {
 
     positionForPullUp: function () {
 
+        this.hideOffScreen();
         this.el.addClass('drag');
         this.moveY(C.client.height + C.ITEM_HEIGHT);
         this.topText.text(this.data.title);

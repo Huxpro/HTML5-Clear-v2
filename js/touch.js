@@ -1,27 +1,36 @@
 // The module that handles all user interactions
-// exposes one variable: isDown (used by C.Collection to determine when to quit animation loop)
+//
+// Modernized: uses native browser scrolling via overflow-y: auto.
+// JS only intercepts at boundaries (pull-down/pull-up) and for
+// non-scroll gestures (horizontal swipe, long-press reorder, pinch).
+//
+// Uses Touch Events (not Pointer Events) to avoid pointercancel issues.
+// Uses addEventListener directly to bypass Zepto event proxy.
+// touchmove is { passive: false } so we can selectively preventDefault.
 
 C.touch = (function () {
 
-    // TouchData object that represents an active touch
+    // Dead zone: movement below this doesn't count as "moved"
+    var tapTolerance = 8;
+
+    // Threshold to trigger a directional gesture
+    var dragThreshold = 15;
+
+    // Long-press delay for reorder
+    var sortDelay = 500;
+
+    // TouchData object
     var TouchData = function (e) {
 
-        this.id = e.identifier || 'mouse';
+        this.id = e.identifier !== undefined ? e.identifier : 'mouse';
 
-        // starting and current x, y
-        this.ox = this.cx = e.pageX;
-        this.oy = this.cy = e.pageY;
+        this.ox = this.cx = e.clientX || e.pageX;
+        this.oy = this.cy = e.clientY || e.pageY;
 
-        // delta x, y
         this.dx = this.dy = 0;
-
-        // total distance x, y
         this.tdx = this.tdy = 0;
 
-        // starting and current time
         this.ot = this.ct = Date.now();
-
-        // delta time
         this.dt = 0;
 
         // target item
@@ -30,23 +39,28 @@ C.touch = (function () {
             this.targetItem = C.currentCollection.getItemById(+targetItemNode.dataset.id);
         }
 
-        // whether the touch has moved
         this.moved = false;
 
     };
 
     TouchData.prototype.update = function (e) {
 
-        this.moved = true;
+        var x = e.clientX || e.pageX,
+            y = e.clientY || e.pageY;
 
-        this.dx = e.pageX - this.cx;
-        this.cx = e.pageX;
+        this.dx = x - this.cx;
+        this.cx = x;
 
-        this.dy = e.pageY - this.cy;
-        this.cy = e.pageY;
+        this.dy = y - this.cy;
+        this.cy = y;
 
         this.tdx = this.cx - this.ox;
         this.tdy = this.cy - this.oy;
+
+        // Only count as moved if beyond dead zone
+        if (!this.moved && (Math.abs(this.tdx) > tapTolerance || Math.abs(this.tdy) > tapTolerance)) {
+            this.moved = true;
+        }
 
         var now = Date.now();
         this.dt = now - this.ct;
@@ -54,391 +68,336 @@ C.touch = (function () {
 
     };
 
-    // the array that holds TouchData objects
-    var touches     = [];
+    var touches = [];
+    var currentAction = null; // null | scroll | swipe | pullDown | pullUp | reorder | pinchIn | pinchOut
 
-    // current gesture
-    var currentAction;
+    // Scroll boundary tracking
+    var atTop = true;
+    var atBottom = false;
 
-    // pinch data, only records vertical distance between two touches
+    // Sort timeout handle
+    var sortTimer = null;
+
+    // Pinch data
     var pinchData = {
-
-        od: null, // starting distance
-        cd: null, // current distance
-        delta: null,
-
+        od: null, cd: null, delta: null,
         init: function () {
             this.od = Math.abs(touches[0].cy - touches[1].cy);
         },
-
         update: function () {
             this.cd = Math.abs(touches[0].cy - touches[1].cy);
             this.delta = this.cd - this.od;
         },
-
         reset: function () {
             this.od = null;
             this.cd = null;
+            this.delta = null;
         }
     };
 
-    // whether it's a touch device
-    var t           = C.client.isTouch;
+    var isTouch = C.client.isTouch;
 
-    // shorthand for event types
-    var start       = t ? 'touchstart' : 'mousedown',
-        move        = t ? 'touchmove' : 'mousemove',
-        end         = t ? 'touchend' : 'mouseup';
+    // ---- Sort timeout helpers ----
 
-    // threshold to trigger dragging
-    var dragThreshold = 20;
-
-    var s = 0;
-
-    // init events
-    function initEvents () {
-
-        C.$wrapper
-            .on(start, function (e) {
-
-                // no touch events during editng.
-                if (C.isEditing) return;
-
-                // only record two fingers
-                // and ignore additional fingers if already in action
-                if (touches.length >= 2 || currentAction) return;
-
-                pub.isDown = true;
-
-                e = t ? e.changedTouches[0] : e;
-
-                // create touch data
-                var touch = new TouchData(e);
-                touches.push(touch);
-
-                if (touches.length === 2) {
-                    pinchData.init();
-                }
-                
-                // process actions ======================================================
-
-                if (touches.length === 1 && touches[0].targetItem) {
-                    actions.itemSort.startTimeout();
-                }
-
-            })
-            .on(move, function (e) {
-
-                if (C.isEditing) return;
-
-                // for mousemove
-                if (!touches.length) return;
-
-                e = t ? e.changedTouches[0] : e;
-
-                // update touch data
-                var i = getTouchIndex(e.identifier || 'mouse');
-                if (i !== -1) {
-                    touches[i].update(e);
-                } else {
-                    return; // ignore touches not in list
-                }
-
-                if (touches.length === 2) {
-                    pinchData.update();
-                }
-
-                // process actions ======================================================
-
-                actions.itemSort.cancelTimeout();
-
-                if (!currentAction) {
-                    if (touches.length === 1) {
-                        actions.collectionDrag.check();
-                        actions.itemDrag.check();
-                    } else {
-                        actions.pinchIn.check();
-                        actions.pinchOut.check();
-                    }
-                } else {
-                    // passing in i to let pinch move handler know which finger is which
-                    actions[currentAction].move(i);
-                }
-                
-            })
-            .on(end, function (e) {
-
-                if (C.isEditing) return;
-
-                e = t ? e.changedTouches[0] : e;
-                var id = e.identifier || 'mouse';
-                var i = getTouchIndex(id);
-
-                // ignore touches not in list
-                if (i === -1) return;
-
-                // isDown
-                if (touches.length === 1) {
-                    pub.isDown = false;
-                }
-
-                // process actions ======================================================
-
-                actions.itemSort.cancelTimeout();
-
-                if (!currentAction) {
-                    if (!touches[0].moved && !C.currentCollection.inMomentum) {
-                        if (touches[0].targetItem) {
-                            actions.itemTap.trigger(e);
-                        } else {
-                            actions.collectionTap.trigger();
-                        }
-                    }
-                } else {
-                    actions[currentAction].end();
-                    if (touches.length === 1) {
-                        currentAction = null; // reset if it's the last finger
-                    }
-                }
-
-                // delete/reset afterwards.
-                touches.splice(i, 1);
-                pinchData.reset();
-                
-            });
-
+    function startSortTimeout () {
+        sortTimer = setTimeout(function () {
+            sortTimer = null;
+            triggerSort();
+        }, sortDelay);
     }
 
-    var actions = {
-
-        collectionDrag: {
-
-            check: function () {
-                if (Math.abs(touches[0].tdy) > dragThreshold) {
-                    currentAction = 'collectionDrag';
-                    C.currentCollection.onDragStart();
-                }
-            },
-
-            move: function () {
-                C.currentCollection.onDragMove(touches[0].dy);
-            },
-
-            end: function () {
-                var speed = touches[0].dy / touches[0].dt;
-                C.currentCollection.onDragEnd(speed);
-            }
-
-        },
-
-        itemDrag: {
-
-            check: function () {
-                if (touches[0].targetItem && Math.abs(touches[0].tdx) > dragThreshold) {
-                    currentAction = 'itemDrag';
-                    touches[0].targetItem.onDragStart();
-                }
-            },
-
-            move: function () {
-                touches[0].targetItem.onDragMove(touches[0].dx);
-            },
-
-            end: function () {
-                touches[0].targetItem.onDragEnd();
-            }
-
-        },
-
-        itemSort: {
-
-            timeOut: null,
-
-            delay: 500,
-
-            startTimeout: function () {
-                this.timeOut = setTimeout(function () {
-                    actions.itemSort.trigger();
-                }, this.delay);
-            },
-
-            move: function () {
-                touches[0].targetItem.onSortMove(touches[0].dy);
-            },
-
-            end: function () {
-                this.cancelTimeout();
-                touches[0].targetItem.onSortEnd();
-            },
-
-            trigger: function () {
-                this.timeOut = null;
-                if (currentAction) return;
-                currentAction = 'itemSort';
-                touches[0].targetItem.onSortStart();
-            },
-
-            cancelTimeout: function () {
-                if (this.timeOut) {
-                    clearTimeout(this.timeOut);
-                    this.timeOut = null;
-                }
-            }
-
-        },
-
-        pinchIn: {
-
-            check: function () {
-                // pinch in is only available for todoCollection
-                if (C.currentCollection.stateType === C.states.LIST_COLLECTION_VIEW) return;
-
-                if (pinchData.delta < -dragThreshold) {
-                    currentAction = 'pinchIn';
-                    C.currentCollection.onPinchInStart();
-                }
-            },
-
-            move: function (i) {
-
-                // avoid extra triggering when one finger is lifted
-                if (touches.length === 1) return;
-
-                var touch = touches[i];
-                C.currentCollection.onPinchInMove(i, touch);
-
-            },
-
-            end: function () {
-
-                if (touches.length === 1) return;
-
-                if (pinchData.cd <= pinchData.od * .5) {
-                    C.currentCollection.onPinchInEnd();
-                } else {
-                    C.currentCollection.onPinchInCancel();
-                }
-            }
-
-        },
-
-        pinchOut: {
-
-            at: null,
-
-            check: function () {
-                if (pinchData.delta > dragThreshold) {
-                    currentAction = 'pinchOut';
-                    C.currentCollection.onPinchOutStart();
-                }
-            },
-
-            move: function (i) {
-
-                if (touches.length === 1) return;
-
-                var touch = touches[i];
-                C.currentCollection.onPinchOutMove(i, touch);
-            },
-
-            end: function () {
-
-                if (touches.length === 1) return;
-
-                if (pinchData.delta > C.ITEM_HEIGHT) {
-                    C.currentCollection.onPinchOutEnd();
-                } else {
-                    C.currentCollection.onPinchOutCancel();
-                }
-                
-            }
-
-        },
-
-        itemTap: {
-
-            trigger: function (e) {
-                touches[0].targetItem.onTap(e);
-            }
-
-        },
-
-        collectionTap: {
-
-            trigger: function () {
-                C.currentCollection.onTap();
-            }
-
+    function cancelSortTimeout () {
+        if (sortTimer) {
+            clearTimeout(sortTimer);
+            sortTimer = null;
         }
-
     }
 
-    function getTouchIndex (id) {
+    function triggerSort () {
+        // Guard: touch may have been removed
+        if (!touches.length || !touches[0].targetItem) return;
+        if (currentAction && currentAction !== 'scroll') return;
 
-        var i = touches.length,
-            t;
-        while (i--) {
-            t = touches[i];
-            if (t.id === id) return i;
-        }
+        currentAction = 'reorder';
 
-        return -1;
-        
+        // Disable native scroll during reorder
+        var wrapper = C.$wrapper[0];
+        wrapper.style.touchAction = 'none';
+        wrapper.style.overflowY = 'hidden';
+
+        touches[0].targetItem.onSortStart();
     }
 
-    // check if a node is within a .item element
+    // ---- Scroll boundary ----
+
+    function updateScrollBounds () {
+        var w = C.$wrapper[0];
+        atTop = w.scrollTop <= 0;
+        atBottom = w.scrollTop >= w.scrollHeight - w.clientHeight - 1;
+    }
+
+    // ---- DOM node helper ----
+
     function getParentItem (node) {
-
-        while (node) { // loop until we reach top of document
-            if (node.className && node.className.match(/\bitem\b/)) {
-                //found one!
+        while (node) {
+            if (node.className && typeof node.className === 'string' && node.className.match(/\bitem\b/)) {
                 return node;
             }
             node = node.parentNode;
         }
-
         return null;
+    }
+
+    function getTouchIndex (id) {
+        var i = touches.length;
+        while (i--) {
+            if (touches[i].id === id) return i;
+        }
+        return -1;
+    }
+
+    // ---- Event handlers ----
+
+    function onStart (e) {
+
+        if (C.isEditing) return;
+        if (touches.length >= 2) return;
+        if (currentAction && currentAction !== 'scroll') return;
+
+        pub.isDown = true;
+
+        var ev = isTouch ? e.changedTouches[0] : e;
+        var touch = new TouchData(ev);
+        touches.push(touch);
+
+        if (touches.length === 2) {
+            pinchData.init();
+        }
+
+        if (touches.length === 1 && touch.targetItem) {
+            startSortTimeout();
+        }
+
+        updateScrollBounds();
+        currentAction = null;
 
     }
 
-    // the public interface
+    function onMove (e) {
+
+        if (C.isEditing) return;
+        if (!touches.length) return;
+
+        var ev = isTouch ? e.changedTouches[0] : e;
+        var id = isTouch ? ev.identifier : 'mouse';
+        var idx = getTouchIndex(id);
+        if (idx === -1) return;
+
+        touches[idx].update(ev);
+
+        if (touches.length === 2) {
+            pinchData.update();
+        }
+
+        // Only cancel sort timer after significant movement
+        if (touches[0].moved) {
+            cancelSortTimeout();
+        }
+
+        // ---- Gesture arbiter ----
+
+        if (!currentAction) {
+
+            if (touches.length === 1) {
+
+                var t0 = touches[0];
+
+                // Horizontal swipe (highest priority)
+                if (t0.targetItem && Math.abs(t0.tdx) > dragThreshold && Math.abs(t0.tdx) > Math.abs(t0.tdy)) {
+                    currentAction = 'swipe';
+                    e.preventDefault();
+                    t0.targetItem.onDragStart();
+                }
+                // Pull down at top boundary
+                else if (atTop && t0.tdy > dragThreshold) {
+                    currentAction = 'pullDown';
+                    e.preventDefault();
+                    C.currentCollection.onPullStart();
+                }
+                // Pull up at bottom boundary
+                else if (atBottom && t0.tdy < -dragThreshold) {
+                    currentAction = 'pullUp';
+                    e.preventDefault();
+                    C.currentCollection.onPullStart();
+                }
+                // Vertical movement within bounds → native scroll
+                else if (Math.abs(t0.tdy) > dragThreshold) {
+                    currentAction = 'scroll';
+                    // Don't preventDefault → browser scrolls natively
+                }
+
+            } else {
+                // Two-finger: check pinch
+                if (C.currentCollection.stateType !== C.states.LIST_COLLECTION_VIEW && pinchData.delta < -dragThreshold) {
+                    currentAction = 'pinchIn';
+                    C.currentCollection.onPinchInStart();
+                } else if (pinchData.delta > dragThreshold) {
+                    currentAction = 'pinchOut';
+                    C.currentCollection.onPinchOutStart();
+                }
+            }
+
+        } else {
+
+            // Dispatch to active gesture
+            switch (currentAction) {
+                case 'swipe':
+                    e.preventDefault();
+                    touches[0].targetItem.onDragMove(touches[0].dx);
+                    break;
+                case 'pullDown':
+                    e.preventDefault();
+                    C.currentCollection.onPullMove('down', touches[0].dy);
+                    break;
+                case 'pullUp':
+                    e.preventDefault();
+                    C.currentCollection.onPullMove('up', touches[0].dy);
+                    break;
+                case 'reorder':
+                    e.preventDefault();
+                    touches[0].targetItem.onSortMove(touches[0].dy);
+                    break;
+                case 'scroll':
+                    // Don't preventDefault → browser scrolls
+                    break;
+                case 'pinchIn':
+                    if (touches.length === 2) C.currentCollection.onPinchInMove(idx, touches[idx]);
+                    break;
+                case 'pinchOut':
+                    if (touches.length === 2) C.currentCollection.onPinchOutMove(idx, touches[idx]);
+                    break;
+            }
+
+        }
+
+    }
+
+    function onEnd (e) {
+
+        if (C.isEditing) return;
+
+        var ev = isTouch ? e.changedTouches[0] : e;
+        var id = isTouch ? ev.identifier : 'mouse';
+        var idx = getTouchIndex(id);
+        if (idx === -1) return;
+
+        if (touches.length === 1) {
+            pub.isDown = false;
+        }
+
+        cancelSortTimeout();
+
+        if (!currentAction) {
+            // Tap detection
+            if (touches[0] && !touches[0].moved) {
+                if (touches[0].targetItem) {
+                    touches[0].targetItem.onTap(ev);
+                } else {
+                    C.currentCollection.onTap();
+                }
+            }
+        } else {
+            switch (currentAction) {
+                case 'swipe':
+                    touches[0].targetItem.onDragEnd();
+                    break;
+                case 'pullDown':
+                    C.currentCollection.onPullEnd('down');
+                    break;
+                case 'pullUp':
+                    C.currentCollection.onPullEnd('up');
+                    break;
+                case 'reorder':
+                    touches[0].targetItem.onSortEnd();
+                    break;
+                case 'scroll':
+                    break;
+                case 'pinchIn':
+                    if (touches.length > 1) {
+                        if (pinchData.cd <= pinchData.od * .5) C.currentCollection.onPinchInEnd();
+                        else C.currentCollection.onPinchInCancel();
+                    }
+                    break;
+                case 'pinchOut':
+                    if (touches.length > 1) {
+                        if (pinchData.delta > C.ITEM_HEIGHT) C.currentCollection.onPinchOutEnd();
+                        else C.currentCollection.onPinchOutCancel();
+                    }
+                    break;
+            }
+            if (touches.length === 1) {
+                currentAction = null;
+            }
+        }
+
+        touches.splice(idx, 1);
+        pinchData.reset();
+
+    }
+
+    // ---- Init ----
+
+    function initEvents () {
+
+        var wrapper = C.$wrapper[0];
+
+        // Track scroll position for boundary detection
+        wrapper.addEventListener('scroll', updateScrollBounds, { passive: true });
+        updateScrollBounds();
+
+        if (isTouch) {
+
+            // Touch device: use Touch Events directly via addEventListener
+            // touchmove MUST be { passive: false } so we can selectively preventDefault
+            wrapper.addEventListener('touchstart', onStart, { passive: true });
+            wrapper.addEventListener('touchmove', onMove, { passive: false });
+            wrapper.addEventListener('touchend', onEnd, { passive: true });
+            wrapper.addEventListener('touchcancel', onEnd, { passive: true });
+
+        } else {
+
+            // Desktop: mouse events
+            wrapper.addEventListener('mousedown', onStart);
+            wrapper.addEventListener('mousemove', onMove);
+            wrapper.addEventListener('mouseup', onEnd);
+
+            // mouseout handling
+            C.$wrapper.on('mouseout', function (e) {
+                var x = e.pageX,
+                    y = e.pageY,
+                    c = C.client;
+                if (x <= c.left || x >= c.right || y <= c.top || y >= c.bottom) {
+                    onEnd(e);
+                }
+            });
+
+        }
+
+    }
+
+    // ---- Public interface ----
+
     var pub = {
 
         init: function () {
-
             C.log('Touch: init');
-
-            // Prevent page dragging.
-            // Must use addEventListener with { passive: false } because
-            // iOS Safari (11.3+) defaults touchmove listeners on body/document
-            // to passive, silently ignoring preventDefault().
-            document.body.addEventListener('touchmove', function (e) {
-                e.preventDefault();
-            }, { passive: false });
-
-            // Fix for mouseout on desktop
-            if (!t) {
-                C.$wrapper.on('mouseout', function (e) {
-
-                    var x = e.pageX,
-                        y = e.pageY,
-                        c = C.client;
-
-                    if (x <= c.left ||
-                        x >= c.right ||
-                        y <= c.top ||
-                        y >= c.bottom) {
-
-                        C.$wrapper.trigger(end);
-
-                    }
-
-                });
-            }
-
+            // NO global touchmove preventDefault!
             initEvents();
+        },
 
-        }
+        isDown: false,
+
+        updateScrollBounds: updateScrollBounds
 
     };
 

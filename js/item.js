@@ -1,5 +1,8 @@
 // The C.Item base object
-// inehrited by C.ListItem and C.TodoItem
+// inherited by C.ListItem and C.TodoItem
+//
+// Modernized: sort uses wrapper.scrollTop for screen position calculation.
+// touch-action toggling happens in onSortStart/onSortEnd.
 
 C.Item = (function (raf) {
 
@@ -199,7 +202,7 @@ C.Item = (function (raf) {
                     item.moveX(0);
                     item.slider.removeClass('drag');
                     item.checkStyle.opacity = 0;
-                    
+
                     if (doneCallback) doneCallback();
 
                 }
@@ -230,6 +233,12 @@ C.Item = (function (raf) {
         },
 
         onSortStart: function () {
+
+            // Disable native scroll during sort
+            var wrapper = C.$wrapper[0];
+            wrapper.style.touchAction = 'none';
+            wrapper.style.overflowY = 'hidden';
+
             this.el
                 .addClass('sorting-trans')
                 .addClass('sorting');
@@ -240,16 +249,13 @@ C.Item = (function (raf) {
             this.moveY(this.y + dy);
 
             var c = this.collection,
-                cy = c.y,
-                ay = this.y + cy; // the actual on screen y
+                wrapper = C.$wrapper[0],
+                // Use wrapper.scrollTop for actual screen position
+                ay = this.y - wrapper.scrollTop; // the actual on screen y
 
-            if (cy < 0 && ay < upperSortMoveThreshold && dy < 3) {
-                // upper move trigger is 1.5x line height
-                // dy < 3 : makes sure upmove only triggers when user moves the dragged item upwards.
-                // the 3px gives a small buffer for incidental downward movements
+            if (wrapper.scrollTop > 0 && ay < upperSortMoveThreshold && dy < 3) {
                 if (!c.sortMoving) c.sortMove(1, this);
-            } else if (cy > this.collection.upperBound && ay > C.client.height - lowerSortMoveThreshold && dy > -3) {
-                // the lower move trigger needs to count in the extra one line of space, thus an extra item height
+            } else if (wrapper.scrollTop < wrapper.scrollHeight - wrapper.clientHeight && ay > C.client.height - lowerSortMoveThreshold && dy > -3) {
                 if (!c.sortMoving) c.sortMove(-1, this);
             } else {
                 c.sortMoving = false;
@@ -277,12 +283,17 @@ C.Item = (function (raf) {
                 }
 
                 this.data.order = currentAt;
-                
+
             }
 
         },
 
         onSortEnd: function () {
+
+            // Restore native scroll after sort
+            var wrapper = C.$wrapper[0];
+            wrapper.style.touchAction = 'manipulation';
+            wrapper.style.overflowY = 'auto';
 
             this.collection.sortMoving = false;
             this.updatePosition();
@@ -333,7 +344,7 @@ C.Item = (function (raf) {
                 }
 
             });
-    
+
         },
 
         clear: function () {

@@ -96,7 +96,6 @@
 
         open: function () {
 
-            if (this.collection.inMomentum) return;
             this.el.addClass('fade');
 
             C.listCollection.open(this.data.order);
